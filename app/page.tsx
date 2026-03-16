@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import Header from '@/components/Header';
 import StatsBar from '@/components/StatsBar';
 import ZonePriceChart from '@/components/ZonePriceChart';
@@ -11,44 +11,106 @@ import AnomalyPanel from '@/components/AnomalyPanel';
 import AIMarketSummary from '@/components/AIMarketSummary';
 import TransitFilter from '@/components/TransitFilter';
 import PriceAlerts from '@/components/PriceAlerts';
-import { listings, getZoneSummaries, getMarketTrends, getSourceStats, getAnomalies } from '@/lib/mockData';
+import ScrapeControl from '@/components/ScrapeControl';
+import { listings as mockListings, getZoneSummaries, getMarketTrends, getSourceStats, getAnomalies } from '@/lib/mockData';
+import { PropertyListing, ZoneSummary, SourceStats } from '@/types/property';
 import { Station } from '@/lib/transitData';
 
-const allZoneSummaries = getZoneSummaries();
-const allMarketTrends = getMarketTrends();
-const allSourceStats = getSourceStats();
-const allAnomalies = getAnomalies();
+type Tab = 'market' | 'anomalies' | 'alerts' | 'scraper';
 
-type Tab = 'market' | 'anomalies' | 'alerts';
+interface LiveData {
+  source: 'scraped' | 'mock' | 'none';
+  listings: PropertyListing[];
+  zoneSummaries: ZoneSummary[];
+  sourceStats: SourceStats[];
+  anomalies: PropertyListing[];
+  scrapedAt: string | null;
+  isStale: boolean;
+  cacheAge: string | null;
+  scrapeStats?: Array<{ source: string; scraped: number; normalized: number; status: 'success' | 'partial' | 'failed'; error?: string }>;
+  totalRaw?: number;
+  totalAfterDedup?: number;
+}
 
 export default function Dashboard() {
   const [selectedZone, setSelectedZone] = useState<string | null>(null);
   const [transitZones, setTransitZones] = useState<string[] | null>(null);
   const [activeStation, setActiveStation] = useState<Station | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('market');
+  const [liveData, setLiveData] = useState<LiveData | null>(null);
+  const [loadingData, setLoadingData] = useState(true);
+
+  // Load real data from API, fallback to mock
+  const loadData = useCallback(async () => {
+    setLoadingData(true);
+    try {
+      const res = await fetch('/api/listings');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.listings?.length > 0) {
+          setLiveData({ ...data, source: 'scraped' });
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('Could not load live data, using mock:', err);
+    }
+    // Fallback to mock data
+    setLiveData({
+      source: 'mock',
+      listings: mockListings.filter(l => l.listingType === 'Sale'),
+      zoneSummaries: getZoneSummaries(),
+      sourceStats: getSourceStats(),
+      anomalies: getAnomalies(),
+      scrapedAt: null,
+      isStale: false,
+      cacheAge: null,
+    });
+    setLoadingData(false);
+  }, []);
+
+  useEffect(() => {
+    loadData().finally(() => setLoadingData(false));
+  }, [loadData]);
+
+  const data = liveData ?? {
+    source: 'mock' as const,
+    listings: mockListings.filter(l => l.listingType === 'Sale'),
+    zoneSummaries: getZoneSummaries(),
+    sourceStats: getSourceStats(),
+    anomalies: getAnomalies(),
+    scrapedAt: null,
+    isStale: false,
+    cacheAge: null,
+  };
 
   const activeZones = transitZones ?? null;
 
   const filteredSummaries = useMemo(() =>
-    activeZones ? allZoneSummaries.filter(z => activeZones.includes(z.zone)) : allZoneSummaries,
-    [activeZones]
+    activeZones ? data.zoneSummaries.filter(z => activeZones.includes(z.zone)) : data.zoneSummaries,
+    [activeZones, data.zoneSummaries]
   );
 
   const saleListings = useMemo(() => {
-    let l = listings.filter(ll => ll.listingType === 'Sale');
+    let l = data.listings;
     if (activeZones) l = l.filter(ll => activeZones.includes(ll.zone));
     return l;
-  }, [activeZones]);
+  }, [activeZones, data.listings]);
 
   const anomalies = useMemo(() =>
-    activeZones ? allAnomalies.filter(a => activeZones.includes(a.zone)) : allAnomalies,
-    [activeZones]
+    activeZones ? data.anomalies.filter(a => activeZones.includes(a.zone)) : data.anomalies,
+    [activeZones, data.anomalies]
   );
 
   const selectedZoneSummary = useMemo(() =>
-    selectedZone ? allZoneSummaries.find(z => z.zone === selectedZone) ?? null : null,
-    [selectedZone]
+    selectedZone ? data.zoneSummaries.find(z => z.zone === selectedZone) ?? null : null,
+    [selectedZone, data.zoneSummaries]
   );
+
+  const marketTrends = useMemo(() => {
+    const topZones = filteredSummaries.slice(0, 5).map(z => z.zone);
+    return getMarketTrends(topZones[0]);
+  }, [filteredSummaries]);
 
   function handleTransitFilter(zones: string[] | null, station: Station | null) {
     setTransitZones(zones);
@@ -58,18 +120,28 @@ export default function Dashboard() {
     }
   }
 
+  const headerTimestamp = data.scrapedAt
+    ? new Date(data.scrapedAt).toLocaleString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short', year: 'numeric' }) + ' ICT'
+    : new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short', year: 'numeric' }) + ' ICT';
+
   const tabs: { id: Tab; label: string }[] = [
     { id: 'market', label: 'MARKET' },
     { id: 'anomalies', label: `ANOMALIES (${anomalies.length})` },
     { id: 'alerts', label: 'ALERTS' },
+    { id: 'scraper', label: 'SCRAPER' },
   ];
 
   return (
     <div className="h-screen bg-zinc-950 text-zinc-300 flex flex-col overflow-hidden" style={{ fontFamily: 'ui-monospace, monospace' }}>
-      <Header lastUpdated="16 Mar 2026 02:00 ICT" />
+      <Header
+        lastUpdated={headerTimestamp}
+        dataSource={data.source}
+        isStale={data.isStale}
+        cacheAge={data.cacheAge}
+      />
       <StatsBar
         zoneSummaries={filteredSummaries}
-        sourceStats={allSourceStats}
+        sourceStats={data.sourceStats}
         totalListings={saleListings.length}
       />
       <TransitFilter onZonesFilter={handleTransitFilter} />
@@ -89,18 +161,29 @@ export default function Dashboard() {
             {tab.label}
           </button>
         ))}
-        {activeStation && (
-          <span className="ml-auto px-3 py-1.5 font-mono text-xs text-cyan-400">
-            Filtered: {activeStation.line} · {activeStation.name}
-            {activeZones && ` — ${activeZones.length} zone${activeZones.length !== 1 ? 's' : ''}`}
-          </span>
-        )}
+        <div className="flex items-center gap-2 ml-auto px-3">
+          {loadingData && <span className="font-mono text-xs text-zinc-500 animate-pulse">LOADING DATA...</span>}
+          {data.source === 'mock' && !loadingData && (
+            <span className="font-mono text-xs text-amber-500">DEMO DATA — Run scraper for live data</span>
+          )}
+          {data.source === 'scraped' && (
+            <span className="font-mono text-xs text-green-400">LIVE · {data.cacheAge}</span>
+          )}
+          {data.isStale && (
+            <span className="font-mono text-xs text-red-400">⚠ DATA STALE</span>
+          )}
+          {activeStation && (
+            <span className="font-mono text-xs text-cyan-400">
+              {activeStation.line} · {activeStation.name}
+              {activeZones && ` — ${activeZones.length} zone${activeZones.length !== 1 ? 's' : ''}`}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Market tab */}
       {activeTab === 'market' && (
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Charts row */}
           <div className="grid grid-cols-2 border-b border-zinc-700 flex-shrink-0">
             <div className="border-r border-zinc-700">
               <ZonePriceChart
@@ -109,15 +192,11 @@ export default function Dashboard() {
                 onZoneSelect={(z) => setSelectedZone(prev => prev === z ? null : z)}
               />
             </div>
-            <TrendChart data={allMarketTrends} />
+            <TrendChart data={marketTrends} />
           </div>
-
-          {/* AI summary */}
           <div className="border-b border-zinc-700 flex-shrink-0">
             <AIMarketSummary selectedZone={selectedZone} zoneSummary={selectedZoneSummary} />
           </div>
-
-          {/* Zone table + listings */}
           <div className="flex-1 grid grid-cols-[280px_1fr] overflow-hidden">
             <div className="border-r border-zinc-700 overflow-auto">
               <ZoneTable
@@ -135,18 +214,16 @@ export default function Dashboard() {
 
       {/* Anomalies tab */}
       {activeTab === 'anomalies' && (
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="grid grid-cols-[280px_1fr] overflow-hidden flex-1">
-            <div className="border-r border-zinc-700 overflow-auto">
-              <ZoneTable
-                data={filteredSummaries}
-                selectedZone={selectedZone}
-                onZoneSelect={setSelectedZone}
-              />
-            </div>
-            <div className="overflow-hidden flex flex-col">
-              <AnomalyPanel anomalies={anomalies} selectedZone={selectedZone} />
-            </div>
+        <div className="flex-1 grid grid-cols-[280px_1fr] overflow-hidden">
+          <div className="border-r border-zinc-700 overflow-auto">
+            <ZoneTable
+              data={filteredSummaries}
+              selectedZone={selectedZone}
+              onZoneSelect={setSelectedZone}
+            />
+          </div>
+          <div className="overflow-hidden flex flex-col">
+            <AnomalyPanel anomalies={anomalies} selectedZone={selectedZone} />
           </div>
         </div>
       )}
@@ -164,12 +241,27 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Scraper tab */}
+      {activeTab === 'scraper' && (
+        <div className="flex-1 overflow-auto">
+          <div className="max-w-3xl mx-auto p-4">
+            <ScrapeControl
+              scrapeStats={data.scrapeStats}
+              scrapedAt={data.scrapedAt}
+              totalRaw={data.totalRaw}
+              totalAfterDedup={data.totalAfterDedup}
+              onScrapeComplete={loadData}
+            />
+          </div>
+        </div>
+      )}
+
       <footer className="border-t border-zinc-700 px-4 py-1 flex items-center justify-between flex-shrink-0">
         <span className="font-mono text-xs text-zinc-600">
-          DISCLAIMER: Data is simulated for demonstration. Not investment advice. AI summaries via claude-sonnet-4-20250514.
+          DISCLAIMER: For research purposes. Not investment advice. AI summaries via claude-sonnet-4-20250514.
         </span>
         <span className="font-mono text-xs text-zinc-600">
-          Sources: DDProperty · FazWaz · Hipflat · Dot Property · Scraped daily 02:00 ICT
+          Sources: DDProperty · FazWaz · Hipflat · Dot Property
         </span>
       </footer>
     </div>
